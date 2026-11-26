@@ -13,10 +13,15 @@ namespace ParamID
     static constexpr const char* gate    = "gate";
     static constexpr const char* word    = "word";
     static constexpr const char* output  = "output";
+    static constexpr const char* fadeIn  = "fadein";
+    static constexpr const char* pan     = "pan";
+    static constexpr const char* chorus  = "chorus";
+    static constexpr const char* phone   = "phone";
+    static constexpr const char* backverb = "backverb";
 }
 
 #ifndef SWELL_VERSION
- #define SWELL_VERSION "1.0.0"
+ #define SWELL_VERSION "1.1.0"
 #endif
 
 // Swell Stutter : on capture une voix (ou on dépose un sample), le plugin trouve le début du mot,
@@ -77,6 +82,9 @@ public:
         std::vector<float> peaks;          // (min, max) par colonne
         std::vector<float> slotMarks;      // début de chaque répétition, en fraction du clip
         float stutterEndFrac = 0.0f;
+        std::vector<float> sourcePeaks;    // toute la voix capturée, (min, max) par colonne
+        std::vector<std::pair<float, float>> words;   // début / fin de chaque mot, en fraction de la voix
+        int wordIndex = -1;                // mot haché
         juce::String status;
         bool busy = false;
     };
@@ -84,6 +92,11 @@ public:
     int getRenderVersion() const { return renderVersion.load(); }
     static juce::File getRenderFolder();
     void markDragged();   // le clip est parti dans la playlist : on le garde sur le disque
+
+    // --- Choix du mot (clic sur la voix) : il devient le mot haché et on l'entend seul ---
+    void selectWord (int index);
+    void playWord (int index);
+    bool isWordPlaying() const { return previewPlaying.load() && previewIsWord.load(); }
 
     // --- Pré-écoute ---
     void togglePreview();
@@ -110,6 +123,12 @@ private:
     std::atomic<float>* pGate = nullptr;
     std::atomic<float>* pWord = nullptr;
     std::atomic<float>* pOutput = nullptr;
+    std::atomic<float>* pFadeIn = nullptr;
+    std::atomic<float>* pPan = nullptr;
+    std::atomic<float>* pChorus = nullptr;
+    std::atomic<float>* pPhone = nullptr;
+    std::atomic<float>* pBackverb = nullptr;
+    std::vector<StutterEngine::Word> lastWords;   // mots de la voix courante (thread des messages)
 
     double currentSampleRate = 44100.0;
     std::atomic<double> hostBpm { 120.0 };
@@ -147,6 +166,8 @@ private:
     std::atomic<int>  previewLength { 0 };
     std::atomic<int>  previewPosAtomic { 0 };
     std::atomic<bool> previewPlaying { false };
+    std::atomic<bool> previewIsWord { false };
+    juce::AudioBuffer<float> clipPreview;   // le clip, gardé pour revenir à la pré-écoute après un mot
 
     juce::ThreadPool renderPool { juce::ThreadPoolOptions().withNumberOfThreads (1).withThreadName ("Swell Stutter render") };
 

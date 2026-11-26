@@ -267,6 +267,80 @@ int main (int argc, char** argv)
     }
 
     // --- 7. Plugin complet
+    // --- 6b. Nouveautés : fin des mots, Fade in, Pan, effets, Backverb
+    std::printf ("[6b] words, fade in, pan, FX\n");
+    {
+        const auto words = StutterEngine::findWords (voice, sr);
+        check (words.size() == 2 && std::abs (words[0].end / sr - 0.65) < 0.03 && std::abs (words[1].end / sr - 1.40) < 0.03,
+               "word ends found (" + String (words.empty() ? 0.0 : words[0].end / sr, 3) + " s, "
+               + String (words.size() < 2 ? 0.0 : words[1].end / sr, 3) + " s)");
+
+        auto peakIn = [] (const AudioBuffer<float>& b, int ch, int from, int len) { return b.getMagnitude (ch, from, jmin (len, b.getNumSamples() - from)); };
+        auto base = s; base.repeats = 4; base.rateBeats = 0.25; base.gate = 0.85f;
+        const auto plain = StutterEngine::render (voice, sr, base);
+
+        auto sf = base; sf.fadeIn = 1.0f;
+        const auto rf = StutterEngine::render (voice, sr, sf);
+        const float first = peakIn (rf.clip, 0, rf.clipOnset + rf.slotStarts[0], rf.slotLengths[0]);
+        const float last = peakIn (rf.clip, 0, rf.clipOnset + rf.slotStarts[3], rf.slotLengths[3]);
+        const float riseDb = Decibels::gainToDecibels (last / jmax (1.0e-6f, first));
+        check (std::abs (riseDb - 30.0f) < 1.5f, "Fade in: repeats grow by " + String (riseDb, 1) + " dB (expected 30)");
+
+        auto sp = base; sp.pan = 1.0f;
+        const auto rp = StutterEngine::render (voice, sr, sp);
+        const float r0L = peakIn (rp.clip, 0, rp.clipOnset + rp.slotStarts[0], rp.slotLengths[0]);
+        const float r0R = peakIn (rp.clip, 1, rp.clipOnset + rp.slotStarts[0], rp.slotLengths[0]);
+        const float r1L = peakIn (rp.clip, 0, rp.clipOnset + rp.slotStarts[1], rp.slotLengths[1]);
+        const float r1R = peakIn (rp.clip, 1, rp.clipOnset + rp.slotStarts[1], rp.slotLengths[1]);
+        check (r0R < r0L * 0.01f && r1L < r1R * 0.01f, "Pan: repeat 1 hard left, repeat 2 hard right");
+
+        // Effets : différents sur les répétitions, phrase identique une fois revenue.
+        for (auto [name, which] : { std::pair<const char*, int> { "Phone", 0 }, { "Chorus", 1 } })
+        {
+            auto se = base;
+            (which == 0 ? se.phone : se.chorus) = 1.0f;
+            const auto re = StutterEngine::render (voice, sr, se);
+            float diffIn = 0.0f, diffAfter = 0.0f;
+            const int after = re.stutterEnd + (int) (0.05 * sr);
+            for (int ch = 0; ch < 2; ++ch)
+            {
+                for (int n = re.clipOnset; n < re.stutterEnd; ++n) diffIn = jmax (diffIn, std::abs (re.clip.getSample (ch, n) - plain.clip.getSample (ch, n)));
+                for (int n = after; n < re.clip.getNumSamples(); ++n) diffAfter = jmax (diffAfter, std::abs (re.clip.getSample (ch, n) - plain.clip.getSample (ch, n)));
+            }
+            check (diffIn > 0.05f && diffAfter == 0.0f, String (name) + ": repeats coloured (" + String (diffIn, 3) + "), phrase back clean (" + String (diffAfter, 6) + ")");
+            float step = 0.0f;
+            for (size_t k = 0; k < re.slotStarts.size(); ++k)
+                step = jmax (step, maxStep (re.clip, re.clipOnset + re.slotStarts[k] - 48, re.clipOnset + re.slotStarts[k] + 48));
+            step = jmax (step, maxStep (re.clip, re.stutterEnd - 48, re.stutterEnd + 48));
+            check (step <= voiceStep * 0.5f, String (name) + ": no clicks at junctions (" + String (step, 4) + ")");
+            writeWav (outDir.getChildFile (String ("05_fx_") + name + ".wav"), re.clip, sr);
+        }
+
+        auto sb = base; sb.backverb = 1.0f;
+        const auto rb = StutterEngine::render (voice, sr, sb);
+        const int beat = (int) std::llround (60.0 / sb.bpm * sr);
+        check (rb.preroll == beat && rb.clipOnset == plain.clipOnset + beat && rb.stutterEnd == plain.stutterEnd + beat,
+               "Backverb: clip starts exactly 1 beat early (" + String (rb.preroll) + " samples)");
+        const float early = rb.clip.getMagnitude (0, 0, beat / 4), late = rb.clip.getMagnitude (0, beat * 3 / 4, beat / 4);
+        check (late > 0.02f && early < late * 0.25f, "Backverb rises into the word (start " + String (early, 4) + ", end " + String (late, 4) + ")");
+        float same = 0.0f;
+        for (int ch = 0; ch < 2; ++ch)
+            for (int n = 0; n < plain.clip.getNumSamples(); n += 7)
+                if (n >= plain.clipOnset) same = jmax (same, std::abs (rb.clip.getSample (ch, n + beat) - plain.clip.getSample (ch, n)));
+        check (same == 0.0f, "Backverb leaves the repeats and the phrase untouched");
+        check (maxStep (rb.clip, rb.clipOnset - 48, rb.clipOnset + 48) <= voiceStep * 0.5f, "Backverb: no click where it meets the word");
+        float phonePeak = 0.0f;
+        {
+            auto sph = base; sph.phone = 1.0f;
+            const auto rph = StutterEngine::render (voice, sr, sph);
+            phonePeak = rph.clip.getMagnitude (0, rph.clipOnset, rph.stutterEnd - rph.clipOnset);
+        }
+        const float plainPeak = plain.clip.getMagnitude (0, plain.clipOnset, plain.stutterEnd - plain.clipOnset);
+        check (phonePeak < plainPeak * 1.4f && phonePeak > plainPeak * 0.4f,
+               "Phone keeps a similar level (" + String (Decibels::gainToDecibels (phonePeak / plainPeak), 1) + " dB)");
+        writeWav (outDir.getChildFile ("06_fx_backverb.wav"), rb.clip, sr);
+    }
+
     std::printf ("[7] plugin\n");
     StutterAudioProcessor p;
     p.setPlayConfigDetails (2, 2, sr, 512);
@@ -317,6 +391,22 @@ int main (int argc, char** argv)
         for (int i = 0; i < 100; ++i) { b.clear(); p.processBlock (b, m); mx = jmax (mx, b.getMagnitude (0, 512)); }
         check (mx > 0.05f, "preview plays the clip");
         p.stopPreview();
+
+        // Clic sur le 2e mot : il devient le mot haché et on l'entend seul
+        p.selectWord (1);
+        check ((int) p.apvts.getRawParameterValue (ParamID::word)->load() == 2, "clicking word 2 selects it");
+        check (p.isWordPlaying(), "clicking a word plays it");
+        mx = 0;
+        for (int i = 0; i < 20; ++i) { b.clear(); p.processBlock (b, m); mx = jmax (mx, b.getMagnitude (0, 512)); }
+        check (mx > 0.05f, "the word is heard");
+        MessageManager::getInstance()->runDispatchLoopUntil (400);
+        p.waitForRender (5000);
+        MessageManager::getInstance()->runDispatchLoopUntil (50);
+        check (p.getRenderInfo().wordIndex == 1 && p.getRenderInfo().words.size() == 2, "the clip now chops word 2");
+        p.togglePreview();
+        check (p.isPreviewPlaying() && ! p.isWordPlaying(), "Preview goes back to the clip");
+        p.stopPreview();
+        setParam (p, ParamID::word, 1.0f);
     }
 
     // --- Captures de l'interface
@@ -341,6 +431,9 @@ int main (int argc, char** argv)
         main->getView().setMoreOpen (true);
         MessageManager::getInstance()->runDispatchLoopUntil (50);
         snap (*ed, "ui_more.png");
+        main->getView().setFxOpen (true);
+        MessageManager::getInstance()->runDispatchLoopUntil (50);
+        snap (*ed, "ui_fx.png");
         main->getView().setMoreOpen (false);
         main->getView().showHelp();
         MessageManager::getInstance()->runDispatchLoopUntil (50);

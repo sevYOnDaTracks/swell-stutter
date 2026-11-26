@@ -10,6 +10,7 @@ VST3 · AU · Standalone — macOS universel (Apple Silicon + Intel). JUCE 8.
 2. **Capture**, puis lecture dans le DAW : l'enregistrement démarre au premier son et s'arrête avec la lecture.
    (Ou déposer un sample de voix sur la grande zone.)
 3. Le plugin trouve le début du mot et rend le clip. Chaque réglage refait le clip tout seul.
+   Pour un autre mot : cliquer dessus dans la bande au-dessus du clip (on l'entend seul, et il devient le mot haché).
 4. **Drag to playlist**.
 
 | Réglage | Rôle |
@@ -19,8 +20,15 @@ VST3 · AU · Standalone — macOS universel (Apple Silicon + Intel). JUCE 8.
 | Build | les répétitions accélèrent (jusqu'à 4× plus vite à la fin) |
 | Pitch | les répétitions montent jusqu'à +12 demi-tons |
 | Gate | 100 % : répétitions collées ; moins : coups plus courts et secs |
-| More → Word | hacher le 2e, 3e… mot au lieu du premier |
+| More → Word | hacher le 2e, 3e… mot au lieu du premier (ou cliquer le mot dans la bande) |
+| More → Fade in | les répétitions montent en volume (de −30 dB à 0 au maximum) |
+| More → Pan | les répétitions alternent gauche / droite |
 | More → Output | niveau du clip |
+| FX → Chorus | répétitions élargies, doublées |
+| FX → Phone | voix téléphone (bande étroite, un peu de grain), niveau gardé |
+| FX → Backverb | reverb inversée qui monte pendant 1 temps et finit sur le mot : le clip démarre 1 temps plus tôt |
+
+Les effets ne colorent que les répétitions (ouverture en 3 ms, fermeture en 40 ms) : la phrase revient propre.
 
 Chaque répétition a une enveloppe anti-clic (1,5 ms d'attaque, 4 ms de fin, en cosinus) et démarre sur un passage par zéro.
 Les clips vont dans `Music/Swell Stutter` ; la voix capturée est gardée dans `Sources/` pour retrouver le clip à la réouverture du projet.

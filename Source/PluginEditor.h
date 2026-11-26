@@ -47,14 +47,22 @@ public:
     void setPlayhead (float p) { if (p != playhead) { playhead = p; repaint(); } }
     bool hasClip() const { return info.file.existsAsFile(); }
     void startDrag();
+    void setWordPlaying (bool p) { if (p != wordPlaying) { wordPlaying = p; repaint(); } }
     void paint (juce::Graphics&) override;
-    void mouseDown (const juce::MouseEvent&) override { dragging = false; }
+    void mouseDown (const juce::MouseEvent&) override;
     void mouseDrag (const juce::MouseEvent&) override;
     void mouseUp (const juce::MouseEvent&) override;
+    void mouseMove (const juce::MouseEvent&) override;
+    void mouseExit (const juce::MouseEvent&) override;
     std::function<void()> onClickEmpty, onDragStarted;
+    std::function<void (int)> onWordClicked;
+    juce::Rectangle<float> wordLane() const;   // bande du haut : toute la voix, mot par mot
+    juce::Rectangle<float> wordBox (int index) const;
 private:
+    int wordAt (juce::Point<float>) const;
     StutterAudioProcessor::RenderInfo info;
-    bool highlight = false, dragging = false;
+    bool highlight = false, dragging = false, pressInLane = false, wordPlaying = false;
+    int hoverWord = -1;
     float playhead = -1.0f;
 };
 
@@ -146,7 +154,9 @@ public:
 
     void showHelp();
     void showSettings();
-    void setMoreOpen (bool open);
+    void setMoreOpen (bool open) { setPage (open ? 1 : 0); }
+    void setFxOpen (bool open)   { setPage (open ? 2 : 0); }
+    void setPage (int page);     // 0 : stutter, 1 : More, 2 : FX
     void refreshNow() { timerCallback(); }
 
 private:
@@ -167,12 +177,14 @@ private:
     SwellLookAndFeel& lnf;
     juce::Image logoS;
 
-    Knob rate, repeats, build, pitch, gate, word, output;
+    Knob rate, repeats, build, pitch, gate, word, output, fadeIn, pan, chorus, phone, backverb;
     std::array<Knob*, 5> mainKnobs { &rate, &repeats, &build, &pitch, &gate };
-    std::array<Knob*, 2> moreKnobs { &word, &output };
-    bool moreOpen = false;
+    std::array<Knob*, 4> moreKnobs { &word, &fadeIn, &pan, &output };
+    std::array<Knob*, 3> fxKnobs { &chorus, &phone, &backverb };
+    int page = 0;
 
     juce::ToggleButton moreButton { "More" };
+    juce::ToggleButton fxButton { "FX" };
     juce::TextButton menuButton;
 
     ClipView clip;

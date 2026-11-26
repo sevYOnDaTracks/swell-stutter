@@ -29,6 +29,11 @@ StutterAudioProcessor::StutterAudioProcessor()
     pGate    = apvts.getRawParameterValue (ParamID::gate);
     pWord    = apvts.getRawParameterValue (ParamID::word);
     pOutput  = apvts.getRawParameterValue (ParamID::output);
+    pFadeIn  = apvts.getRawParameterValue (ParamID::fadeIn);
+    pPan     = apvts.getRawParameterValue (ParamID::pan);
+    pChorus  = apvts.getRawParameterValue (ParamID::chorus);
+    pPhone   = apvts.getRawParameterValue (ParamID::phone);
+    pBackverb = apvts.getRawParameterValue (ParamID::backverb);
     startTimerHz (20);
 }
 
@@ -55,12 +60,17 @@ juce::AudioProcessorValueTreeState::ParameterLayout StutterAudioProcessor::creat
         { return v < 0.05f ? String ("Off") : "+" + String (v, v < 10.0f ? 1 : 0) + " st"; })));
     p.push_back (std::make_unique<AudioParameterFloat> (ParameterID { ParamID::gate, 1 }, "Gate",
         NormalisableRange<float> (0.25f, 1.0f, 0.001f), 0.85f, AudioParameterFloatAttributes().withStringFromValueFunction (pct)));
-    p.push_back (std::make_unique<AudioParameterInt> (ParameterID { ParamID::word, 1 }, "Word", 1, 8, 1,
+    p.push_back (std::make_unique<AudioParameterInt> (ParameterID { ParamID::word, 1 }, "Word", 1, 32, 1,
         AudioParameterIntAttributes().withStringFromValueFunction ([] (int v, int)
         { static const char* n[] = { "1st", "2nd", "3rd" }; return v <= 3 ? String (n[v - 1]) : String (v) + "th"; })));
     p.push_back (std::make_unique<AudioParameterFloat> (ParameterID { ParamID::output, 1 }, "Output",
         NormalisableRange<float> (-24.0f, 12.0f, 0.1f), 0.0f,
         AudioParameterFloatAttributes().withStringFromValueFunction ([] (float v, int) { return String (v, 1) + " dB"; })));
+    auto amount = [] (float v, int) { return v < 0.005f ? String ("Off") : String (roundToInt (v * 100)) + " %"; };
+    for (auto [id, name] : { std::pair<const char*, const char*> { ParamID::fadeIn, "Fade in" }, { ParamID::pan, "Pan" },
+                             { ParamID::chorus, "Chorus" }, { ParamID::phone, "Phone" }, { ParamID::backverb, "Backverb" } })
+        p.push_back (std::make_unique<AudioParameterFloat> (ParameterID { id, 1 }, name, NormalisableRange<float> (0.0f, 1.0f, 0.001f), 0.0f,
+                                                            AudioParameterFloatAttributes().withStringFromValueFunction (amount)));
     return { p.begin(), p.end() };
 }
 
@@ -116,7 +126,8 @@ juce::String StutterAudioProcessor::renderKey() const
     const auto s = currentSettings();
     juce::String k;
     k << s.rateBeats << "|" << s.repeats << "|" << s.build << "|" << s.pitch << "|" << s.gate << "|"
-      << s.word << "|" << s.gainDb << "|" << juce::roundToInt (s.bpm * 10);
+      << s.word << "|" << s.gainDb << "|" << juce::roundToInt (s.bpm * 10) << "|" << s.fadeIn << "|" << s.pan << "|"
+      << s.chorus << "|" << s.phone << "|" << s.backverb;
     return k;
 }
 
@@ -131,6 +142,11 @@ StutterEngine::Settings StutterAudioProcessor::currentSettings() const
     s.gate      = pGate->load();
     s.word      = (int) pWord->load();
     s.gainDb    = pOutput->load();
+    s.fadeIn    = pFadeIn->load();
+    s.pan       = pPan->load();
+    s.chorus    = pChorus->load();
+    s.phone     = pPhone->load();
+    s.backverb  = pBackverb->load();
     return s;
 }
 
@@ -218,9 +234,16 @@ void StutterAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
 // ============================================================ Pré-écoute
 void StutterAudioProcessor::togglePreview()
 {
-    if (previewPlaying.load()) { previewPlaying.store (false); return; }
+    if (previewPlaying.load() && ! previewIsWord.load()) { previewPlaying.store (false); return; }
+    previewPlaying.store (false);
     {
         const juce::SpinLock::ScopedLockType lock (previewLock);
+        if (previewIsWord.load())
+        {
+            previewBuffer = clipPreview;
+            previewIsWord.store (false);
+            previewLength.store (previewBuffer.getNumSamples());
+        }
         if (previewBuffer.getNumSamples() == 0)
             return;
         previewPos = 0;
@@ -254,10 +277,72 @@ void StutterAudioProcessor::buildPreview (const juce::AudioBuffer<float>& clip, 
     }
     previewPlaying.store (false);
     const juce::SpinLock::ScopedLockType lock (previewLock);
+    clipPreview = out;
     std::swap (previewBuffer, out);
+    previewIsWord.store (false);
     previewPos = 0;
     previewPosAtomic.store (0);
     previewLength.store (previewBuffer.getNumSamples());
+}
+
+void StutterAudioProcessor::selectWord (int index)
+{
+    {
+        const juce::ScopedLock sl (renderLock);
+        if (index < 0 || index >= (int) lastWords.size())
+            return;
+    }
+    if (auto* prm = apvts.getParameter (ParamID::word))
+    {
+        prm->beginChangeGesture();
+        prm->setValueNotifyingHost (prm->convertTo0to1 ((float) (index + 1)));
+        prm->endChangeGesture();
+    }
+    playWord (index);
+}
+
+void StutterAudioProcessor::playWord (int index)
+{
+    StutterEngine::Word w;
+    {
+        const juce::ScopedLock sl (renderLock);
+        if (lastSource == nullptr || index < 0 || index >= (int) lastWords.size())
+            return;
+        w = lastWords[(size_t) index];
+    }
+    const int len = juce::jmax (1, w.end - w.start);
+    juce::AudioBuffer<float> word (2, len);
+    const int chs = lastSource->getNumChannels();
+    const int fade = juce::jmin (len / 2, (int) (0.005 * lastSourceRate));
+    for (int ch = 0; ch < 2; ++ch)
+    {
+        word.copyFrom (ch, 0, *lastSource, juce::jmin (ch, chs - 1), w.start, juce::jmin (len, lastSource->getNumSamples() - w.start));
+        word.applyGainRamp (ch, len - fade, fade, 1.0f, 0.0f);
+    }
+    juce::AudioBuffer<float> out;
+    if (std::abs (lastSourceRate - currentSampleRate) < 1.0)
+        out = word;
+    else
+    {
+        const double ratio = lastSourceRate / currentSampleRate;
+        const int outLen = juce::jmax (1, (int) std::floor (len / ratio));
+        out.setSize (2, outLen);
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            juce::LagrangeInterpolator interp;
+            interp.process (ratio, word.getReadPointer (ch), out.getWritePointer (ch), outLen);
+        }
+    }
+    previewPlaying.store (false);
+    {
+        const juce::SpinLock::ScopedLockType lock (previewLock);
+        std::swap (previewBuffer, out);
+        previewIsWord.store (true);
+        previewPos = 0;
+        previewPosAtomic.store (0);
+        previewLength.store (previewBuffer.getNumSamples());
+    }
+    previewPlaying.store (true);
 }
 
 // ============================================================ Capture + rendu
@@ -364,6 +449,8 @@ void StutterAudioProcessor::renderFromBuffer (const juce::AudioBuffer<float>& so
     renderPool.addJob ([this, srcCopy, sr, settings, key, rateIdx, name, saveSource]
     {
         auto res = StutterEngine::render (*srcCopy, sr, settings);
+        auto words = StutterEngine::findWords (*srcCopy, sr);
+        auto srcPeaks = StutterEngine::peaks (*srcCopy, 600);
 
         auto folder = getRenderFolder();
         folder.createDirectory();
@@ -414,9 +501,17 @@ void StutterAudioProcessor::renderFromBuffer (const juce::AudioBuffer<float>& so
                 for (int s : res.slotStarts)
                     renderInfo.slotMarks.push_back ((float) (res.clipOnset + s) / len);
                 renderInfo.stutterEndFrac = (float) res.stutterEnd / len;
+                const float srcLen = (float) juce::jmax (1, srcCopy->getNumSamples());
+                renderInfo.sourcePeaks = srcPeaks;
+                renderInfo.words.clear();
+                for (auto& w : words)
+                    renderInfo.words.push_back ({ (float) w.start / srcLen, (float) w.end / srcLen });
+                renderInfo.wordIndex = res.wordIndex;
+                lastWords = words;
                 renderInfo.status = "Word " + juce::String (juce::jmin (settings.word, res.wordsFound)) + " of "
                                   + juce::String (res.wordsFound) + fr ("  ·  ") + juce::String (settings.repeats) + fr (" × ")
-                                  + rateNames()[rateIdx] + " at " + juce::String (juce::roundToInt (settings.bpm)) + " BPM";
+                                  + rateNames()[rateIdx] + " at " + juce::String (juce::roundToInt (settings.bpm)) + " BPM"
+                                  + (res.preroll > 0 ? fr ("  ·  Backverb: drop the clip 1 beat early") : juce::String());
             }
             else
             {
@@ -424,6 +519,9 @@ void StutterAudioProcessor::renderFromBuffer (const juce::AudioBuffer<float>& so
                 renderInfo.file = juce::File();
                 renderInfo.peaks.clear();
                 renderInfo.slotMarks.clear();
+                renderInfo.sourcePeaks.clear();
+                renderInfo.words.clear();
+                renderInfo.wordIndex = -1;
                 renderInfo.status = res.ok ? "Could not write to Music/Swell Stutter" : "No voice found in this sound";
             }
             ++renderVersion;

@@ -339,6 +339,7 @@ HelpOverlay::HelpOverlay() : OverlayPanel ("How it works")
         "Press Capture, then play your vocal in your DAW. Capture stops with playback.\n"
         "You can also drop a vocal sample on the big area, or click it to load one.\n"
         "Swell finds the first word and chops it in time with your tempo.\n"
+        "Want another word? Click it in the strip above the clip: you hear it, and it gets chopped.\n"
         "Drag the clip into your playlist. Done.\n\n"
         "Knobs\n"
         "Rate: how long each repeat lasts, locked to your tempo (1/4 to 1/32, T = triplet).\n"
@@ -347,7 +348,12 @@ HelpOverlay::HelpOverlay() : OverlayPanel ("How it works")
         "Pitch: the repeats climb in pitch, up to the last one.\n"
         "Gate: 100 % = repeats touch each other. Lower = shorter, drier hits.\n\n"
         "More\n"
-        "Word: chop the 2nd or 3rd word instead of the first. Output: clip level.\n\n"
+        "Word: which word is chopped (or click it in the strip). Fade in: the repeats grow louder.\n"
+        "Pan: the repeats bounce left and right. Output: clip level.\n\n"
+        "FX\n"
+        "Chorus, Phone (telephone voice) and Backverb (reverse reverb rising into the word).\n"
+        "They colour the repeats only: the phrase comes back clean.\n"
+        "With Backverb, the clip starts 1 beat early: drop it one beat before the word.\n\n"
         "Tips\n"
         "Every knob change makes a new clip by itself. Preview to listen.\n"
         "Double-click a knob to reset it. Clips are saved in Music/Swell Stutter.");
@@ -445,7 +451,47 @@ void ClipView::paint (Graphics& g)
     g.setColour (SwellColours::panel);
     g.fillRoundedRectangle (r, 10.0f);
 
-    const auto wave = r.reduced (22.0f, 30.0f);
+    auto wave = r.reduced (22.0f, 30.0f);
+    if (! info.words.empty())
+    {
+        wave.setTop (wordLane().getBottom() + 14.0f);
+
+        // Bande des mots : la voix entière, chaque mot cliquable, le mot haché en couleur.
+        const auto lane = wordLane();
+        const auto& sp = info.sourcePeaks;
+        const int scols = (int) sp.size() / 2;
+        for (int i = 0; i < (int) info.words.size(); ++i)
+        {
+            const auto box = wordBox (i);
+            const bool sel = i == info.wordIndex, over = i == hoverWord;
+            g.setColour (sel ? SwellColours::accent().withAlpha (wordPlaying ? 0.32f : 0.20f)
+                             : SwellColours::track.withAlpha (over ? 0.9f : 0.45f));
+            g.fillRoundedRectangle (box, 4.0f);
+            if (sel)
+            {
+                g.setColour (SwellColours::accent());
+                g.drawRoundedRectangle (box.reduced (0.5f), 4.0f, 1.2f);
+            }
+        }
+        if (scols > 1)
+        {
+            const float mid = lane.getCentreY(), half = lane.getHeight() * 0.42f;
+            const int px = jmax (1, (int) lane.getWidth());
+            for (int x = 0; x < px; ++x)
+            {
+                const int c0 = x * scols / px, c1 = jmax (c0 + 1, (x + 1) * scols / px);
+                float mn = 0.0f, mx = 0.0f;
+                for (int i = c0; i < c1 && i < scols; ++i) { mn = jmin (mn, sp[(size_t) i * 2]); mx = jmax (mx, sp[(size_t) i * 2 + 1]); }
+                const float frac = (float) x / (float) px;
+                bool inSel = false;
+                if (isPositiveAndBelow (info.wordIndex, (int) info.words.size()))
+                    inSel = frac >= info.words[(size_t) info.wordIndex].first && frac < info.words[(size_t) info.wordIndex].second;
+                g.setColour (inSel ? SwellColours::text : SwellColours::label.withAlpha (0.5f));
+                const float top = mid - jmin (1.0f, mx) * half, bottom = mid - jmax (-1.0f, mn) * half;
+                g.fillRect (lane.getX() + (float) x, top, 1.0f, jmax (1.0f, bottom - top));
+            }
+        }
+    }
     const auto& pk = info.peaks;
     const int cols = (int) pk.size() / 2;
 
@@ -512,6 +558,58 @@ void ClipView::paint (Graphics& g)
     }
 }
 
+Rectangle<float> ClipView::wordLane() const
+{
+    return getLocalBounds().toFloat().reduced (22.0f, 0.0f).withTrimmedTop (16.0f).withHeight (34.0f);
+}
+
+Rectangle<float> ClipView::wordBox (int i) const
+{
+    const auto lane = wordLane();
+    if (! isPositiveAndBelow (i, (int) info.words.size()))
+        return {};
+    const auto [a, b] = info.words[(size_t) i];
+    const float x0 = lane.getX() + lane.getWidth() * a, x1 = lane.getX() + lane.getWidth() * b;
+    return { x0 - 2.0f, lane.getY(), jmax (6.0f, x1 - x0 + 4.0f), lane.getHeight() };
+}
+
+int ClipView::wordAt (Point<float> p) const
+{
+    if (! wordLane().expanded (0.0f, 4.0f).contains (p))
+        return -1;
+    int best = -1;
+    float bestDist = 1.0e9f;
+    for (int i = 0; i < (int) info.words.size(); ++i)
+    {
+        const auto box = wordBox (i);
+        if (box.contains (p.x, box.getCentreY())) return i;
+        const float d = jmin (std::abs (p.x - box.getX()), std::abs (p.x - box.getRight()));
+        if (d < bestDist) { bestDist = d; best = i; }
+    }
+    return bestDist < 12.0f ? best : -1;
+}
+
+void ClipView::mouseDown (const MouseEvent& e)
+{
+    dragging = false;
+    pressInLane = ! info.words.empty() && wordLane().expanded (0.0f, 4.0f).contains (e.position);
+    if (pressInLane)
+        if (const int w = wordAt (e.position); w >= 0 && onWordClicked)
+            onWordClicked (w);
+}
+
+void ClipView::mouseMove (const MouseEvent& e)
+{
+    const int w = info.words.empty() ? -1 : wordAt (e.position);
+    if (w != hoverWord) { hoverWord = w; repaint(); }
+    setMouseCursor (w >= 0 ? MouseCursor::PointingHandCursor : MouseCursor::NormalCursor);
+}
+
+void ClipView::mouseExit (const MouseEvent&)
+{
+    if (hoverWord >= 0) { hoverWord = -1; repaint(); }
+}
+
 void ClipView::startDrag()
 {
     if (! hasClip())
@@ -523,7 +621,7 @@ void ClipView::startDrag()
 
 void ClipView::mouseDrag (const MouseEvent& e)
 {
-    if (dragging || ! hasClip() || e.getDistanceFromDragStart() < 6)
+    if (pressInLane || dragging || ! hasClip() || e.getDistanceFromDragStart() < 6)
         return;
     dragging = true;
     startDrag();
@@ -531,7 +629,7 @@ void ClipView::mouseDrag (const MouseEvent& e)
 
 void ClipView::mouseUp (const MouseEvent& e)
 {
-    if (! dragging && ! hasClip() && e.getDistanceFromDragStart() < 4 && onClickEmpty)
+    if (! pressInLane && ! dragging && ! hasClip() && e.getDistanceFromDragStart() < 4 && onClickEmpty)
         onClickEmpty();
 }
 
@@ -547,11 +645,20 @@ StutterMainView::StutterMainView (StutterAudioProcessor& p, SwellLookAndFeel& l)
     setupKnob (gate,    ParamID::gate,    "Gate",    "100 %: repeats touch each other. Lower: shorter, drier hits.");
     setupKnob (word,    ParamID::word,    "Word",    "Which word to chop: the 1st, 2nd, 3rd...");
     setupKnob (output,  ParamID::output,  "Output",  "Level of the clip.");
+    setupKnob (fadeIn,  ParamID::fadeIn,  "Fade in", "The repeats start quiet and grow louder.");
+    setupKnob (pan,     ParamID::pan,     "Pan",     "The repeats bounce left and right.");
+    setupKnob (chorus,  ParamID::chorus,  "Chorus",  "Wide, doubled repeats. The phrase comes back clean.");
+    setupKnob (phone,   ParamID::phone,   "Phone",   "Telephone voice on the repeats. The phrase comes back clean.");
+    setupKnob (backverb, ParamID::backverb, "Backverb", "Reverse reverb rising into the word. The clip starts 1 beat early.");
 
     moreButton.setClickingTogglesState (true);
-    moreButton.setTooltip ("Word and output.");
-    moreButton.onClick = [this] { setMoreOpen (moreButton.getToggleState()); };
+    moreButton.setTooltip ("Word, fade in, pan and output.");
+    moreButton.onClick = [this] { setPage (moreButton.getToggleState() ? 1 : 0); };
     addAndMakeVisible (moreButton);
+    fxButton.setClickingTogglesState (true);
+    fxButton.setTooltip ("Chorus, phone and backverb on the repeats.");
+    fxButton.onClick = [this] { setPage (fxButton.getToggleState() ? 2 : 0); };
+    addAndMakeVisible (fxButton);
 
     menuButton.setButtonText (String (CharPointer_UTF8 ("\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2")));
     menuButton.getProperties().set ("flat", true);
@@ -563,6 +670,7 @@ StutterMainView::StutterMainView (StutterAudioProcessor& p, SwellLookAndFeel& l)
     addAndMakeVisible (clip);
     clip.onClickEmpty  = [this] { chooseFile(); };
     clip.onDragStarted = [this] { proc.markDragged(); };
+    clip.onWordClicked = [this] (int w) { proc.selectWord (w); };
     captureButton.onClick = [this] { proc.toggleCapture(); };
     captureButton.setTooltip ("Arm, then press play in your DAW. Recording starts on the first sound and stops with playback.");
     playButton.onClick = [this] { proc.togglePreview(); };
@@ -603,12 +711,14 @@ void StutterMainView::setupKnob (Knob& k, const String& paramId, const String& n
         k.slider.setDoubleClickReturnValue (true, param->convertFrom0to1 (param->getDefaultValue()));
 }
 
-void StutterMainView::setMoreOpen (bool open)
+void StutterMainView::setPage (int p)
 {
-    moreOpen = open;
-    moreButton.setToggleState (open, dontSendNotification);
-    for (auto* k : mainKnobs) { k->slider.setVisible (! open); k->label.setVisible (! open); }
-    for (auto* k : moreKnobs) { k->slider.setVisible (open);   k->label.setVisible (open); }
+    page = jlimit (0, 2, p);
+    moreButton.setToggleState (page == 1, dontSendNotification);
+    fxButton.setToggleState (page == 2, dontSendNotification);
+    for (auto* k : mainKnobs) { k->slider.setVisible (page == 0); k->label.setVisible (page == 0); }
+    for (auto* k : moreKnobs) { k->slider.setVisible (page == 1); k->label.setVisible (page == 1); }
+    for (auto* k : fxKnobs)   { k->slider.setVisible (page == 2); k->label.setVisible (page == 2); }
 }
 
 void StutterMainView::showMainMenu()
@@ -699,7 +809,7 @@ void StutterMainView::timerCallback()
         const auto info = proc.getRenderInfo();
         clip.setInfo (info);
         const bool ready = info.file.existsAsFile();
-        clip.setTooltip (ready ? "Drag the clip into your playlist." : String());
+        clip.setTooltip (ready ? "Click a word in the strip to hear it and chop it. Drag the clip into your playlist." : String());
         playButton.setEnabled (ready);
         dragButton.setEnabled (ready);
     }
@@ -711,10 +821,11 @@ void StutterMainView::timerCallback()
     }
 
     const bool playing = proc.isPreviewPlaying();
-    const String playText = playing ? "Stop" : "Preview";
+    const String playText = playing && ! proc.isWordPlaying() ? "Stop" : "Preview";
     if (playButton.getButtonText() != playText)
         playButton.setButtonText (playText);
-    clip.setPlayhead (playing ? proc.getPreviewProgress() : -1.0f);
+    clip.setPlayhead (playing && ! proc.isWordPlaying() ? proc.getPreviewProgress() : -1.0f);
+    clip.setWordPlaying (proc.isWordPlaying());
 
     ++blink;
     String capText = "Capture";
@@ -774,7 +885,8 @@ void StutterMainView::resized()
     dragButton.setBounds (actions);
 
     auto footer = area.removeFromBottom (36);
-    moreButton.setBounds (footer.removeFromLeft (100).withSizeKeepingCentre (100, 24));
+    moreButton.setBounds (footer.removeFromLeft (90).withSizeKeepingCentre (90, 24));
+    fxButton.setBounds (footer.removeFromLeft (80).withSizeKeepingCentre (80, 24));
 
     area.removeFromTop (14);
     const int cw = area.getWidth() / 5;
@@ -788,6 +900,9 @@ void StutterMainView::resized()
         place (*k, row.removeFromLeft (cw));
     row = area;
     for (auto* k : moreKnobs)
+        place (*k, row.removeFromLeft (cw));
+    row = area;
+    for (auto* k : fxKnobs)
         place (*k, row.removeFromLeft (cw));
 
     if (help != nullptr)     help->setBounds (getLocalBounds());
