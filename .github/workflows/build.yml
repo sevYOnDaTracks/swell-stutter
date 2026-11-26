@@ -1,0 +1,24 @@
+name: Build Swell Stutter
+on: [push, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -A x64
+      - name: Build VST3 + Standalone
+        run: cmake --build build --config Release --parallel 3 --target SwellStutter_VST3 SwellStutter_Standalone
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path package/Windows -Force
+          Copy-Item -Recurse 'build/SwellStutter_artefacts/Release/VST3/Swell Stutter.vst3' package/Windows/
+          Copy-Item 'build/SwellStutter_artefacts/Release/Standalone/Swell Stutter.exe' package/Windows/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Swell-Stutter-Windows
+          path: package/Windows
+          if-no-files-found: error
