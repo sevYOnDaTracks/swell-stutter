@@ -303,11 +303,20 @@ Result render (const juce::AudioBuffer<float>& source, double sr, const Settings
         const int dst = pre + r.slotStarts[(size_t) k];
         // Fade in : de -30 dB (au maximum) à 0 dB sur la dernière répétition.
         const float level = juce::Decibels::decibelsToGain (-30.0f * juce::jlimit (0.0f, 1.0f, s.fadeIn) * (float) (1.0 - t));
-        // Pan : une répétition à gauche, la suivante à droite (loi à puissance constante, 1 au centre).
-        const float side = (k % 2 == 0 ? -1.0f : 1.0f) * juce::jlimit (0.0f, 1.0f, s.pan);
-        const float angle = (side + 1.0f) * juce::MathConstants<float>::pi * 0.25f;
-        const float chGain[2] { level * std::cos (angle) * juce::MathConstants<float>::sqrt2,
-                                level * std::sin (angle) * juce::MathConstants<float>::sqrt2 };
+        // Pan : une répétition à gauche, la suivante à droite (loi à puissance constante, gain 1 au centre).
+        // À 0 % les gains valent exactement 1 : le clip est identique, échantillon pour échantillon, à un rendu sans Pan.
+        const float width = juce::jlimit (0.0f, 1.0f, s.pan);
+        float chGain[2] { level, level };
+        if (width > 0.0f)
+        {
+            const float side = (k % 2 == 0 ? -1.0f : 1.0f) * width;
+            const float angle = (side + 1.0f) * juce::MathConstants<float>::pi * 0.25f;
+            chGain[0] = level * std::cos (angle) * juce::MathConstants<float>::sqrt2;
+            chGain[1] = level * std::sin (angle) * juce::MathConstants<float>::sqrt2;
+        }
+        // Voix stéréo : on la replie vers le mono à mesure que le Pan s'ouvre, sinon une répétition
+        // envoyée à gauche perdrait tout ce que contenait le canal droit.
+        const bool stereoIn = srcCh > 1 && width > 0.0f;
 
         for (int n = 0; n < play; ++n)
         {
@@ -317,11 +326,20 @@ Result render (const juce::AudioBuffer<float>& source, double sr, const Settings
                 break;
             const float frac = (float) (sp - i0);
             const float w = rampUp (n, fi) * rampUp (play - 1 - n, fo);
+            float in[2];
             for (int ch = 0; ch < 2; ++ch)
             {
                 const auto* src = source.getReadPointer (srcCh2 (ch));
-                r.clip.setSample (ch, dst + n, (src[i0] + frac * (src[i0 + 1] - src[i0])) * w * chGain[ch]);
+                in[ch] = src[i0] + frac * (src[i0 + 1] - src[i0]);
             }
+            if (stereoIn)
+            {
+                const float mid = 0.5f * (in[0] + in[1]);
+                in[0] += width * (mid - in[0]);
+                in[1] += width * (mid - in[1]);
+            }
+            for (int ch = 0; ch < 2; ++ch)
+                r.clip.setSample (ch, dst + n, in[ch] * w * chGain[ch]);
         }
     }
 

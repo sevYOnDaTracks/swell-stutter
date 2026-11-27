@@ -6,7 +6,7 @@ if(APPLE)
     set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "")
 endif()
 
-project(SwellStutter VERSION 1.1.0)
+project(SwellStutter VERSION 1.2.0)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -78,7 +78,7 @@ target_link_libraries(SwellStutter
 option(SWELL_BUILD_TESTS "Build offline render test" OFF)
 if(SWELL_BUILD_TESTS)
     juce_add_console_app(SwellStutterTest PRODUCT_NAME "SwellStutterTest")
-    target_sources(SwellStutterTest PRIVATE Tests/StutterTest.cpp ${SWELL_SOURCES})
+    target_sources(SwellStutterTest PRIVATE Tests/StutterTest.cpp Tests/Legacy/StutterEngineV100.cpp ${SWELL_SOURCES})
     target_compile_definitions(SwellStutterTest PRIVATE ${SWELL_DEFS} JUCE_MODAL_LOOPS_PERMITTED=1)
     target_link_libraries(SwellStutterTest
         PRIVATE monocypher juce::juce_cryptography juce::juce_audio_utils SwellStutterAssets

@@ -11,6 +11,7 @@
 #include <juce_events/juce_events.h>
 #include "../Source/PluginProcessor.h"
 #include "../Source/PluginEditor.h"
+#include "Legacy/StutterEngineV100.h"
 #include <cstdlib>
 
 using namespace juce;
@@ -294,6 +295,109 @@ int main (int argc, char** argv)
         const float r1R = peakIn (rp.clip, 1, rp.clipOnset + rp.slotStarts[1], rp.slotLengths[1]);
         check (r0R < r0L * 0.01f && r1L < r1R * 0.01f, "Pan: repeat 1 hard left, repeat 2 hard right");
 
+        // Pan, en détail : alternance sur toutes les répétitions, puissance constante, mono et stéréo, 0 % inchangé.
+        auto energy = [] (const AudioBuffer<float>& b, int ch, int from, int len)
+        {
+            double e = 0.0;
+            for (int n = from; n < jmin (from + len, b.getNumSamples()); ++n) e += (double) b.getSample (ch, n) * b.getSample (ch, n);
+            return e;
+        };
+        auto panOf = [&] (const StutterEngine::Result& res, int k)   // -1 gauche, +1 droite
+        {
+            const double l = energy (res.clip, 0, res.clipOnset + res.slotStarts[(size_t) k], res.slotLengths[(size_t) k]);
+            const double rr = energy (res.clip, 1, res.clipOnset + res.slotStarts[(size_t) k], res.slotLengths[(size_t) k]);
+            return (rr - l) / jmax (1.0e-12, rr + l);
+        };
+        auto totalEnergy = [&] (const StutterEngine::Result& res, int k)
+        {
+            return energy (res.clip, 0, res.clipOnset + res.slotStarts[(size_t) k], res.slotLengths[(size_t) k])
+                 + energy (res.clip, 1, res.clipOnset + res.slotStarts[(size_t) k], res.slotLengths[(size_t) k]);
+        };
+
+        // Voix stéréo : gauche et droite différentes (le canal droit est la voix, plus discrète et décalée)
+        AudioBuffer<float> stereoVoice (2, voice.getNumSamples());
+        stereoVoice.copyFrom (0, 0, voice, 0, 0, voice.getNumSamples());
+        stereoVoice.clear (1, 0, voice.getNumSamples());
+        stereoVoice.addFrom (1, 3, voice, 0, 0, voice.getNumSamples() - 3, 0.6f);
+
+        for (auto [label, src] : { std::pair<const char*, const AudioBuffer<float>*> { "mono", &voice }, { "stereo", &stereoVoice } })
+        {
+            auto s8 = base; s8.repeats = 8;
+            const auto centre = StutterEngine::render (*src, sr, s8);
+            for (float width : { 0.5f, 1.0f })
+            {
+                auto sw = s8; sw.pan = width;
+                const auto rw = StutterEngine::render (*src, sr, sw);
+                bool alternates = true, powerKept = true;
+                double worstPan = 0.0, worstPowerDb = 0.0;
+                for (int k = 0; k < 8; ++k)
+                {
+                    const double pk = panOf (rw, k), want = (k % 2 == 0 ? -1.0 : 1.0);
+                    alternates = alternates && pk * want > 0.0;
+                    worstPan = jmax (worstPan, std::abs (pk - want * (width >= 1.0f ? 1.0 : std::sin (width * MathConstants<double>::halfPi))));
+                    // Puissance constante : même énergie totale par répétition qu'au centre (voix repliée en mono pour la stéréo)
+                    const double ref = width >= 1.0f && src == &stereoVoice ? -1.0 : totalEnergy (centre, k);
+                    if (ref > 0.0)
+                    {
+                        const double db = 10.0 * std::log10 (totalEnergy (rw, k) / ref);
+                        worstPowerDb = jmax (worstPowerDb, std::abs (db));
+                        powerKept = powerKept && std::abs (db) < 0.5 + (src == &stereoVoice ? 1.5 : 0.0);
+                    }
+                }
+                check (alternates, String (label) + ", Pan " + String (roundToInt (width * 100)) + " %: 8 repeats go L, R, L, R...");
+                if (src == &voice)
+                {
+                    check (worstPan < 0.02, String (label) + ", Pan " + String (roundToInt (width * 100)) + " %: positions on target (worst error " + String (worstPan, 3) + ")");
+                    check (powerKept, String (label) + ", Pan " + String (roundToInt (width * 100)) + " %: constant power (worst " + String (worstPowerDb, 2) + " dB)");
+                }
+                // Clics : on regarde 1 ms autour de chaque jonction (début et fin de chaque coup), là où le côté change
+                const int jw = (int) (0.001 * sr);
+                float step = 0.0f, levelAtJunction = 0.0f;
+                for (size_t k = 0; k < rw.slotStarts.size(); ++k)
+                    for (int j : { rw.clipOnset + rw.slotStarts[k], rw.clipOnset + rw.slotStarts[k] + (int) std::round (sw.gate * rw.slotLengths[k]) })
+                    {
+                        step = jmax (step, maxStep (rw.clip, j - jw, j + jw));
+                        for (int ch = 0; ch < 2; ++ch)
+                            levelAtJunction = jmax (levelAtJunction, std::abs (rw.clip.getSample (ch, j)));
+                    }
+                step = jmax (step, maxStep (rw.clip, rw.stutterEnd - jw, rw.stutterEnd + jw));
+                check (levelAtJunction < 0.02f, String (label) + ", Pan " + String (roundToInt (width * 100)) + " %: signal near zero where the side switches (" + String (levelAtJunction, 4) + ")");
+                check (step <= voiceStep * 0.5f, String (label) + ", Pan " + String (roundToInt (width * 100)) + " %: no clicks at repeat junctions (" + String (step, 4) + ")");
+                // La phrase revient au centre, intacte
+                float phraseDiff = 0.0f;
+                for (int ch = 0; ch < 2; ++ch)
+                    for (int n = rw.stutterEnd; n < rw.clip.getNumSamples(); ++n)
+                        phraseDiff = jmax (phraseDiff, std::abs (rw.clip.getSample (ch, n) - centre.clip.getSample (ch, n)));
+                check (phraseDiff == 0.0f, String (label) + ", Pan " + String (roundToInt (width * 100)) + " %: phrase untouched");
+            }
+            if (src == &stereoVoice)
+            {
+                // Pan 100 % en stéréo : rien du canal droit ne se perd (repliement en mono)
+                auto sw = s8; sw.pan = 1.0f;
+                const auto rw = StutterEngine::render (*src, sr, sw);
+                const int from = rw.clipOnset + rw.slotStarts[0], len = rw.slotLengths[0];
+                double errMax = 0.0, peak = 0.0;
+                for (int n = 0; n < len; ++n)
+                {
+                    const double want = MathConstants<double>::sqrt2 * 0.5 * ((double) centre.clip.getSample (0, from + n) + centre.clip.getSample (1, from + n));
+                    errMax = jmax (errMax, std::abs (rw.clip.getSample (0, from + n) - want));
+                    peak = jmax (peak, std::abs (want));
+                }
+                check (peak > 0.01 && errMax < peak * 1.0e-4, "stereo, Pan 100 %: hard-left repeat carries both input channels");
+            }
+
+            // 0 % : exactement le clip de Swell Stutter 1.0.0 (avant Fade in / Pan / effets)
+            StutterEngineV100::Settings old;
+            old.bpm = s8.bpm; old.rateBeats = s8.rateBeats; old.repeats = s8.repeats; old.build = s8.build;
+            old.pitch = s8.pitch; old.gate = s8.gate; old.word = s8.word; old.gainDb = s8.gainDb;
+            const auto legacy = StutterEngineV100::render (*src, sr, old);
+            bool same = legacy.clip.getNumSamples() == centre.clip.getNumSamples();
+            for (int ch = 0; ch < 2 && same; ++ch)
+                for (int n = 0; n < centre.clip.getNumSamples() && same; ++n)
+                    same = legacy.clip.getSample (ch, n) == centre.clip.getSample (ch, n);
+            check (same, String (label) + ", Pan 0 %: clip bit-identical to Swell Stutter 1.0.0");
+        }
+
         // Effets : différents sur les répétitions, phrase identique une fois revenue.
         for (auto [name, which] : { std::pair<const char*, int> { "Phone", 0 }, { "Chorus", 1 } })
         {
@@ -409,6 +513,58 @@ int main (int argc, char** argv)
         setParam (p, ParamID::word, 1.0f);
     }
 
+    // --- Presets
+    std::printf ("[8] presets\n");
+    {
+        auto val = [&] (const char* id) { return p.apvts.getRawParameterValue (id)->load(); };
+        auto indexOf = [&] (const String& name)
+        {
+            const auto list = p.getPresets();
+            for (int i = 0; i < (int) list.size(); ++i)
+                if (list[(size_t) i].name == name) return i;
+            return -1;
+        };
+        const auto factory = p.getPresets();
+        check (factory.size() == 10 && p.getNumPrograms() == 10 && p.getProgramName (6) == "Ping-pong",
+               "10 factory presets, also listed as host programs");
+
+        setParam (p, ParamID::word, 2.0f);
+        check (p.loadPreset (indexOf ("Ping-pong")), "load Ping-pong");
+        check (val (ParamID::pan) == 1.0f && (int) val (ParamID::repeats) == 8 && std::abs (val (ParamID::gate) - 0.8f) < 1.0e-3f
+               && val (ParamID::build) == 0.0f, "Ping-pong: Pan 100 %, 8 repeats, gate 80 %, the rest at default");
+        check ((int) val (ParamID::word) == 2, "a preset never changes the chosen word");
+        check (p.getPresetName() == "Ping-pong" && ! p.isPresetModified() && p.getCurrentProgram() == 6, "preset name shown, not modified");
+        setParam (p, ParamID::pitch, 5.0f);
+        check (p.isPresetModified(), "moving a knob marks the preset as modified");
+
+        check (p.saveUserPreset ("My bounce"), "save a user preset");
+        check (StutterAudioProcessor::getPresetFolder().getChildFile ("My bounce.preset").existsAsFile(), "written to the Presets folder");
+        const int mine = indexOf ("My bounce");
+        check (mine == 10 && ! p.getPresets()[(size_t) mine].factory, "user preset listed after the factory ones");
+
+        p.loadPreset (indexOf ("Default"));
+        check (val (ParamID::pan) == 0.0f && val (ParamID::pitch) == 0.0f && (int) val (ParamID::repeats) == 4, "Default puts everything back");
+        p.loadPreset (mine);
+        check (val (ParamID::pan) == 1.0f && std::abs (val (ParamID::pitch) - 5.0f) < 1.0e-3f && (int) val (ParamID::repeats) == 8,
+               "user preset reloads its settings");
+
+        // Le nom du preset suit le projet
+        MemoryBlock state;
+        p.getStateInformation (state);
+        StutterAudioProcessor p2;
+        p2.setStateInformation (state.getData(), (int) state.getSize());
+        p2.setCurrentProgram (p2.getCurrentProgram());   // un DAW qui rappelle le programme courant
+        check (p2.getPresetName() == "My bounce" && p2.apvts.getRawParameterValue (ParamID::pan)->load() == 1.0f,
+               "preset name and settings come back with the project");
+
+        check (p.deleteUserPreset (mine) && indexOf ("My bounce") < 0, "delete a user preset");
+        check (! p.deleteUserPreset (0), "factory presets cannot be deleted");
+        p.loadPreset (0);
+        setParam (p, ParamID::word, 1.0f);
+        MessageManager::getInstance()->runDispatchLoopUntil (400);
+        p.waitForRender (5000);
+    }
+
     // --- Captures de l'interface
     std::printf ("[ui] snapshots\n");
     {
@@ -428,9 +584,43 @@ int main (int argc, char** argv)
             FileOutputStream os (f); png.writeImageToStream (img, os);
         };
         snap (*ed, "ui.png");
+        {
+            // En-tête avec un preset chargé, et le menu des presets ouvert (avec un preset à toi)
+            p.saveUserPreset ("My bounce");
+            p.loadPreset (6);                               // Ping-pong
+            MessageManager::getInstance()->runDispatchLoopUntil (400);
+            p.waitForRender (5000);
+            main->getView().refreshNow();
+            snap (*ed, "ui_preset.png");
+            const int before = Desktop::getInstance().getNumComponents();
+            main->getView().openPresetMenu();
+            MessageManager::getInstance()->runDispatchLoopUntil (300);
+            if (Desktop::getInstance().getNumComponents() > before)
+                if (auto* menu = Desktop::getInstance().getComponent (Desktop::getInstance().getNumComponents() - 1))
+                    snap (*menu, "ui_preset_menu.png");
+            PopupMenu::dismissAllActiveMenus();
+            MessageManager::getInstance()->runDispatchLoopUntil (100);
+            p.deleteUserPreset ((int) p.getPresets().size() - 1);
+            p.loadPreset (0);
+            setParam (p, ParamID::repeats, 6.0f);
+            setParam (p, ParamID::build, 0.6f);
+            MessageManager::getInstance()->runDispatchLoopUntil (400);
+            p.waitForRender (5000);
+            main->getView().refreshNow();
+        }
         main->getView().setMoreOpen (true);
         MessageManager::getInstance()->runDispatchLoopUntil (50);
         snap (*ed, "ui_more.png");
+        setParam (p, ParamID::pan, 1.0f);                 // le ping-pong gauche / droite, ouvert à fond
+        MessageManager::getInstance()->runDispatchLoopUntil (400);
+        p.waitForRender (5000);
+        main->getView().refreshNow();
+        MessageManager::getInstance()->runDispatchLoopUntil (50);
+        snap (*ed, "ui_pan.png");
+        setParam (p, ParamID::pan, 0.0f);
+        MessageManager::getInstance()->runDispatchLoopUntil (400);
+        p.waitForRender (5000);
+        main->getView().refreshNow();
         main->getView().setFxOpen (true);
         MessageManager::getInstance()->runDispatchLoopUntil (50);
         snap (*ed, "ui_fx.png");

@@ -564,6 +564,180 @@ StutterAudioProcessor::RenderInfo StutterAudioProcessor::getRenderInfo() const
     return renderInfo;
 }
 
+// ============================================================ Presets
+namespace
+{
+    struct FactoryPreset { const char* name; std::map<juce::String, float> values; };
+
+    // Valeurs « réelles » des réglages (Rate : index dans 1/4, 1/8, 1/8T, 1/16, 1/16T, 1/32).
+    // Ce qui n'est pas cité reprend sa valeur par défaut.
+    const std::vector<FactoryPreset>& factoryPresets()
+    {
+        static const std::vector<FactoryPreset> list {
+            { "Default",        {} },
+            { "Tight 1/32",     { { ParamID::rate, 5 }, { ParamID::repeats, 8 }, { ParamID::gate, 0.7f } } },
+            { "Triplet roll",   { { ParamID::rate, 4 }, { ParamID::repeats, 6 }, { ParamID::gate, 0.9f } } },
+            { "Slow 1/8",       { { ParamID::rate, 1 }, { ParamID::repeats, 3 }, { ParamID::gate, 0.6f } } },
+            { "Build up",       { { ParamID::rate, 3 }, { ParamID::repeats, 8 }, { ParamID::build, 0.7f }, { ParamID::fadeIn, 0.5f } } },
+            { "Riser +12",      { { ParamID::rate, 3 }, { ParamID::repeats, 8 }, { ParamID::build, 0.5f }, { ParamID::pitch, 12.0f }, { ParamID::fadeIn, 0.4f } } },
+            { "Ping-pong",      { { ParamID::rate, 3 }, { ParamID::repeats, 8 }, { ParamID::gate, 0.8f }, { ParamID::pan, 1.0f } } },
+            { "Phone stutter",  { { ParamID::rate, 3 }, { ParamID::repeats, 4 }, { ParamID::phone, 0.8f } } },
+            { "Wide chorus",    { { ParamID::rate, 1 }, { ParamID::repeats, 4 }, { ParamID::chorus, 0.7f }, { ParamID::pan, 0.5f } } },
+            { "Backverb intro", { { ParamID::rate, 1 }, { ParamID::repeats, 4 }, { ParamID::backverb, 0.8f } } },
+        };
+        return list;
+    }
+}
+
+const juce::StringArray& StutterAudioProcessor::presetParamIds()
+{
+    // Tout sauf Word : le mot dépend de la voix, pas du preset.
+    static const juce::StringArray ids { ParamID::rate, ParamID::repeats, ParamID::build, ParamID::pitch, ParamID::gate,
+                                         ParamID::output, ParamID::fadeIn, ParamID::pan, ParamID::chorus, ParamID::phone, ParamID::backverb };
+    return ids;
+}
+
+juce::File StutterAudioProcessor::getPresetFolder() { return getRenderFolder().getChildFile ("Presets"); }
+
+std::vector<StutterAudioProcessor::Preset> StutterAudioProcessor::getPresets() const
+{
+    std::vector<Preset> list;
+    for (auto& f : factoryPresets())
+        list.push_back ({ f.name, true, {} });
+    auto files = getPresetFolder().findChildFiles (juce::File::findFiles, false, "*.preset");
+    std::sort (files.begin(), files.end(), [] (const juce::File& a, const juce::File& b)
+               { return a.getFileNameWithoutExtension().compareNatural (b.getFileNameWithoutExtension()) < 0; });
+    for (auto& f : files)
+        list.push_back ({ f.getFileNameWithoutExtension(), false, f });
+    return list;
+}
+
+std::map<juce::String, float> StutterAudioProcessor::currentPresetValues() const
+{
+    std::map<juce::String, float> v;
+    for (auto& id : presetParamIds())
+        if (auto* raw = apvts.getRawParameterValue (id))
+            v[id] = raw->load();
+    return v;
+}
+
+void StutterAudioProcessor::applyPresetValues (const std::map<juce::String, float>& values, const juce::String& name)
+{
+    for (auto& id : presetParamIds())
+        if (auto* param = apvts.getParameter (id))
+        {
+            const auto it = values.find (id);
+            const float norm = it != values.end() ? param->convertTo0to1 (it->second) : param->getDefaultValue();
+            param->beginChangeGesture();
+            param->setValueNotifyingHost (norm);
+            param->endChangeGesture();
+        }
+    apvts.state.setProperty ("preset", name, nullptr);
+    loadedPresetValues = currentPresetValues();
+}
+
+bool StutterAudioProcessor::loadPreset (int index)
+{
+    const auto list = getPresets();
+    if (! juce::isPositiveAndBelow (index, (int) list.size()))
+        return false;
+    const auto& p = list[(size_t) index];
+    if (p.factory)
+    {
+        applyPresetValues (factoryPresets()[(size_t) index].values, p.name);
+        return true;
+    }
+    const auto xml = juce::parseXML (p.file);
+    if (xml == nullptr || ! xml->hasTagName ("SwellStutterPreset"))
+        return false;
+    std::map<juce::String, float> values;
+    for (auto* e : xml->getChildWithTagNameIterator ("PARAM"))
+        if (presetParamIds().contains (e->getStringAttribute ("id")))
+            values[e->getStringAttribute ("id")] = (float) e->getDoubleAttribute ("value");
+    // Un réglage absent du fichier (preset d'une ancienne version) garde sa valeur actuelle
+    for (auto& [id, v] : currentPresetValues())
+        values.emplace (id, v);
+    applyPresetValues (values, p.name);
+    return true;
+}
+
+bool StutterAudioProcessor::saveUserPreset (const juce::String& rawName)
+{
+    const auto name = juce::File::createLegalFileName (rawName.trim());
+    if (name.isEmpty())
+        return false;
+    juce::XmlElement xml ("SwellStutterPreset");
+    xml.setAttribute ("name", name);
+    xml.setAttribute ("version", SWELL_VERSION);
+    for (auto& [id, v] : currentPresetValues())
+    {
+        auto* e = xml.createNewChildElement ("PARAM");
+        e->setAttribute ("id", id);
+        e->setAttribute ("value", v);
+    }
+    auto folder = getPresetFolder();
+    folder.createDirectory();
+    if (! xml.writeTo (folder.getChildFile (name + ".preset")))
+        return false;
+    apvts.state.setProperty ("preset", name, nullptr);
+    loadedPresetValues = currentPresetValues();
+    return true;
+}
+
+bool StutterAudioProcessor::deleteUserPreset (int index)
+{
+    const auto list = getPresets();
+    if (! juce::isPositiveAndBelow (index, (int) list.size()) || list[(size_t) index].factory)
+        return false;
+    if (getPresetName() == list[(size_t) index].name)
+    {
+        apvts.state.setProperty ("preset", juce::String(), nullptr);
+        loadedPresetValues.clear();
+    }
+    return list[(size_t) index].file.moveToTrash() || list[(size_t) index].file.deleteFile();
+}
+
+juce::String StutterAudioProcessor::getPresetName() const { return apvts.state.getProperty ("preset").toString(); }
+
+bool StutterAudioProcessor::isPresetModified() const
+{
+    if (loadedPresetValues.empty())
+        return false;
+    for (auto& [id, v] : currentPresetValues())
+    {
+        const auto it = loadedPresetValues.find (id);
+        if (it == loadedPresetValues.end() || std::abs (it->second - v) > 1.0e-4f)
+            return true;
+    }
+    return false;
+}
+
+int StutterAudioProcessor::getNumPrograms() { return (int) factoryPresets().size(); }
+
+int StutterAudioProcessor::getCurrentProgram()
+{
+    const auto name = getPresetName();
+    for (int i = 0; i < (int) factoryPresets().size(); ++i)
+        if (name == factoryPresets()[(size_t) i].name)
+            return i;
+    return 0;
+}
+
+void StutterAudioProcessor::setCurrentProgram (int i)
+{
+    // Certains DAW rappellent le programme courant à l'ouverture d'un projet : on ne touche alors à rien,
+    // pour ne jamais écraser les réglages enregistrés avec le projet.
+    if (i == getCurrentProgram())
+        return;
+    if (juce::isPositiveAndBelow (i, (int) factoryPresets().size()))
+        loadPreset (i);
+}
+
+const juce::String StutterAudioProcessor::getProgramName (int i)
+{
+    return juce::isPositiveAndBelow (i, (int) factoryPresets().size()) ? juce::String (factoryPresets()[(size_t) i].name) : juce::String();
+}
+
 // ============================================================ État
 void StutterAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
@@ -585,6 +759,7 @@ void StutterAudioProcessor::setStateInformation (const void* data, int sizeInByt
             auto tree = juce::ValueTree::fromXml (*xml);
             const juce::File src (tree.getProperty ("source").toString());
             apvts.replaceState (tree);
+            loadedPresetValues.clear();   // à la réouverture, le nom reste affiché tel quel
             if (src.existsAsFile())
                 juce::MessageManager::callAsync ([this, src, safe = juce::WeakReference<StutterAudioProcessor> (this)]
                 {

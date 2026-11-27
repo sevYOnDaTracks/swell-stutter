@@ -22,11 +22,17 @@ VST3 · AU · Standalone — macOS universel (Apple Silicon + Intel). JUCE 8.
 | Gate | 100 % : répétitions collées ; moins : coups plus courts et secs |
 | More → Word | hacher le 2e, 3e… mot au lieu du premier (ou cliquer le mot dans la bande) |
 | More → Fade in | les répétitions montent en volume (de −30 dB à 0 au maximum) |
-| More → Pan | les répétitions alternent gauche / droite |
+| More → Pan | les répétitions alternent gauche / droite (0 % : centré ; puissance constante ; une voix stéréo est repliée en mono à mesure que le Pan s'ouvre) |
 | More → Output | niveau du clip |
 | FX → Chorus | répétitions élargies, doublées |
 | FX → Phone | voix téléphone (bande étroite, un peu de grain), niveau gardé |
 | FX → Backverb | reverb inversée qui monte pendant 1 temps et finit sur le mot : le clip démarre 1 temps plus tôt |
+
+**Presets** (menu au centre de l'en-tête) : 10 presets d'usine (Default, Tight 1/32, Triplet roll, Slow 1/8, Build up,
+Riser +12, Ping-pong, Phone stutter, Wide chorus, Backverb intro) et les tiens avec **Save preset…** (rangés dans
+`Music/Swell Stutter/Presets`, un fichier `.preset` chacun, donc disponibles dans tous les projets). Un preset ne change que
+les réglages du son : jamais la voix capturée ni le mot choisi. Un « * » après le nom veut dire qu'un réglage a bougé.
+Les presets d'usine sont aussi visibles dans le menu de presets du DAW.
 
 Les effets ne colorent que les répétitions (ouverture en 3 ms, fermeture en 40 ms) : la phrase revient propre.
 

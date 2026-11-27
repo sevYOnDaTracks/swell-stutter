@@ -667,6 +667,11 @@ StutterMainView::StutterMainView (StutterAudioProcessor& p, SwellLookAndFeel& l)
     menuButton.onClick = [this] { showMainMenu(); };
     addAndMakeVisible (menuButton);
 
+    presetButton.getProperties().set ("flat", true);
+    presetButton.setTooltip ("Presets. Save your own settings with Save preset.");
+    presetButton.onClick = [this] { showPresetMenu(); };
+    addAndMakeVisible (presetButton);
+
     addAndMakeVisible (clip);
     clip.onClickEmpty  = [this] { chooseFile(); };
     clip.onDragStarted = [this] { proc.markDragged(); };
@@ -743,6 +748,70 @@ void StutterMainView::showMainMenu()
     });
 }
 
+void StutterMainView::refreshPresetLabel()
+{
+    auto name = proc.getPresetName();
+    if (name.isEmpty()) name = "Presets";
+    else if (proc.isPresetModified()) name += "*";
+    if (name != presetLabel)
+    {
+        presetLabel = name;
+        presetButton.setButtonText (name + String (CharPointer_UTF8 ("  \xe2\x96\xbe")));
+    }
+}
+
+// Menu des presets : ceux d'usine, puis les tiens, puis Enregistrer / Supprimer.
+void StutterMainView::showPresetMenu()
+{
+    const auto list = proc.getPresets();
+    const auto current = proc.getPresetName();
+    PopupMenu m, del;
+    m.setLookAndFeel (&lnf);
+    bool anyUser = false;
+    for (int i = 0; i < (int) list.size(); ++i)
+    {
+        if (! list[(size_t) i].factory && ! anyUser)
+        {
+            m.addSeparator();
+            m.addSectionHeader ("My presets");
+            anyUser = true;
+        }
+        m.addItem (1 + i, list[(size_t) i].name, true, list[(size_t) i].name == current);
+        if (! list[(size_t) i].factory)
+            del.addItem (1001 + i, list[(size_t) i].name);
+    }
+    m.addSeparator();
+    m.addItem (2000, fr ("Save preset…"));
+    if (anyUser)
+        m.addSubMenu ("Delete preset", del);
+    m.showMenuAsync (PopupMenu::Options().withTargetComponent (presetButton), [this] (int id)
+    {
+        if (id >= 1 && id < 1000)        proc.loadPreset (id - 1);
+        else if (id > 1000 && id < 2000) proc.deleteUserPreset (id - 1001);
+        else if (id == 2000)             askPresetName();
+        refreshPresetLabel();
+    });
+}
+
+void StutterMainView::askPresetName()
+{
+    auto* w = new AlertWindow ("Save preset", "Name your preset.", MessageBoxIconType::NoIcon, this);
+    w->setLookAndFeel (&lnf);
+    const auto current = proc.getPresetName();
+    bool isUser = false;
+    for (auto& p : proc.getPresets())
+        isUser = isUser || (! p.factory && p.name == current);
+    w->addTextEditor ("name", isUser ? current : String(), {});
+    w->addButton ("Save", 1, KeyPress (KeyPress::returnKey));
+    w->addButton ("Cancel", 0, KeyPress (KeyPress::escapeKey));
+    w->enterModalState (true, ModalCallbackFunction::create ([this, w] (int result)
+    {
+        if (result == 1)
+            proc.saveUserPreset (w->getTextEditorContents ("name"));
+        refreshPresetLabel();
+    }), true);
+}
+
 void StutterMainView::chooseFile()
 {
     chooser = std::make_unique<FileChooser> ("Choose a vocal", File(), "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.m4a;*.ogg");
@@ -814,6 +883,8 @@ void StutterMainView::timerCallback()
         dragButton.setEnabled (ready);
     }
 
+    refreshPresetLabel();
+
     if (proc.getHostBpm() != lastBpm)
     {
         lastBpm = proc.getHostBpm();
@@ -872,6 +943,7 @@ void StutterMainView::resized()
 
     auto header = area.removeFromTop (60);
     menuButton.setBounds (header.removeFromRight (34).withSizeKeepingCentre (34, 30));
+    presetButton.setBounds (header.withSizeKeepingCentre (190, 30));   // au centre de l'en-tête, discret
 
     clip.setBounds (area.removeFromTop (200));
     area.removeFromTop (12);

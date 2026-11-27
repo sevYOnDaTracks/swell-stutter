@@ -3,6 +3,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "Licence/SwellLicence.h"
 #include "StutterEngine.h"
+#include <map>
 
 namespace ParamID
 {
@@ -21,7 +22,7 @@ namespace ParamID
 }
 
 #ifndef SWELL_VERSION
- #define SWELL_VERSION "1.1.0"
+ #define SWELL_VERSION "1.2.0"
 #endif
 
 // Swell Stutter : on capture une voix (ou on dépose un sample), le plugin trouve le début du mot,
@@ -49,11 +50,24 @@ public:
     bool isMidiEffect() const override { return false; }
     double getTailLengthSeconds() const override { return 0.0; }
 
-    int getNumPrograms() override { return 1; }
-    int getCurrentProgram() override { return 0; }
-    void setCurrentProgram (int) override {}
-    const juce::String getProgramName (int) override { return {}; }
+    // Les presets d'usine sont aussi visibles comme « programmes » dans le DAW.
+    int getNumPrograms() override;
+    int getCurrentProgram() override;
+    void setCurrentProgram (int) override;
+    const juce::String getProgramName (int) override;
     void changeProgramName (int, const juce::String&) override {}
+
+    // --- Presets : d'usine, puis ceux de l'utilisateur (Music/Swell Stutter/Presets).
+    // Un preset ne change que les réglages du son : jamais la voix capturée ni le mot choisi.
+    struct Preset { juce::String name; bool factory = true; juce::File file; };
+    std::vector<Preset> getPresets() const;
+    bool loadPreset (int index);                       // index dans getPresets()
+    bool saveUserPreset (const juce::String& name);    // écrase un preset utilisateur du même nom
+    bool deleteUserPreset (int index);
+    juce::String getPresetName() const;                // vide si aucun preset chargé
+    bool isPresetModified() const;                     // un réglage a bougé depuis le chargement
+    static juce::File getPresetFolder();
+    static const juce::StringArray& presetParamIds();
 
     void getStateInformation (juce::MemoryBlock& destData) override;
     void setStateInformation (const void* data, int sizeInBytes) override;
@@ -128,6 +142,10 @@ private:
     std::atomic<float>* pChorus = nullptr;
     std::atomic<float>* pPhone = nullptr;
     std::atomic<float>* pBackverb = nullptr;
+    void applyPresetValues (const std::map<juce::String, float>& values, const juce::String& name);
+    std::map<juce::String, float> currentPresetValues() const;
+    std::map<juce::String, float> loadedPresetValues;   // pour savoir si le preset a été retouché
+
     std::vector<StutterEngine::Word> lastWords;   // mots de la voix courante (thread des messages)
 
     double currentSampleRate = 44100.0;

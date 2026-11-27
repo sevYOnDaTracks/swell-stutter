@@ -158,6 +158,7 @@ public:
     void setFxOpen (bool open)   { setPage (open ? 2 : 0); }
     void setPage (int page);     // 0 : stutter, 1 : More, 2 : FX
     void refreshNow() { timerCallback(); }
+    void openPresetMenu() { showPresetMenu(); }   // banc de test
 
 private:
     struct Knob
@@ -170,6 +171,9 @@ private:
     void timerCallback() override;
     void setupKnob (Knob&, const juce::String& paramId, const juce::String& name, const juce::String& tip);
     void showMainMenu();
+    void showPresetMenu();
+    void askPresetName();
+    void refreshPresetLabel();
     void chooseFile();
     void applyAccent (juce::Colour c);
 
@@ -186,6 +190,8 @@ private:
     juce::ToggleButton moreButton { "More" };
     juce::ToggleButton fxButton { "FX" };
     juce::TextButton menuButton;
+    juce::TextButton presetButton;
+    juce::String presetLabel;
 
     ClipView clip;
     ActionButton captureButton { "Capture", ActionButton::Icon::record };
